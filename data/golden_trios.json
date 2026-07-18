@@ -1,0 +1,44 @@
+[
+  {
+    "id": "top-customers-by-spend",
+    "question": "Who are our top 10 customers by total spend?",
+    "sql": "SELECT o.user_id, u.state, u.country, COUNT(DISTINCT o.order_id) AS orders, ROUND(SUM(oi.sale_price), 2) AS total_spend FROM `bigquery-public-data.thelook_ecommerce.orders` o JOIN `bigquery-public-data.thelook_ecommerce.order_items` oi ON oi.order_id = o.order_id JOIN `bigquery-public-data.thelook_ecommerce.users` u ON u.id = o.user_id WHERE o.status NOT IN ('Cancelled', 'Returned') GROUP BY o.user_id, u.state, u.country ORDER BY total_spend DESC LIMIT 10",
+    "report": "Top customers by lifetime spend (completed business only — cancelled and returned orders are excluded per our revenue convention). Customers are identified by numeric user_id; we never surface names or emails in reports. Headline: the top 10 customers account for a small fraction of total revenue — this is a long-tail business, so retention programs matter more than whale management. Note order counts alongside spend: a high-spend single-order customer is a different retention play than a loyal repeat buyer."
+  },
+  {
+    "id": "monthly-revenue-trend",
+    "question": "What is our monthly revenue trend over the last 12 months?",
+    "sql": "SELECT FORMAT_DATE('%Y-%m', DATE(o.created_at)) AS month, ROUND(SUM(oi.sale_price), 2) AS revenue, COUNT(DISTINCT o.order_id) AS orders, ROUND(SUM(oi.sale_price) / COUNT(DISTINCT o.order_id), 2) AS avg_order_value FROM `bigquery-public-data.thelook_ecommerce.orders` o JOIN `bigquery-public-data.thelook_ecommerce.order_items` oi ON oi.order_id = o.order_id WHERE o.status NOT IN ('Cancelled', 'Returned') AND DATE(o.created_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 12 MONTH) GROUP BY month ORDER BY month",
+    "report": "Monthly revenue, order volume, and average order value for the trailing 12 months (completed business only). When reporting a trend, always separate the volume effect (more orders) from the basket effect (higher AOV) — executives ask 'are we selling more, or selling bigger?'. The most recent month is usually partial: flag it rather than reporting it as a decline."
+  },
+  {
+    "id": "state-spend-comparison",
+    "question": "Why are users from state X underspending compared to users in state Y?",
+    "sql": "SELECT u.state, COUNT(DISTINCT u.id) AS customers, COUNT(DISTINCT o.order_id) AS orders, ROUND(SUM(oi.sale_price), 2) AS revenue, ROUND(SUM(oi.sale_price) / COUNT(DISTINCT u.id), 2) AS revenue_per_customer, ROUND(SUM(oi.sale_price) / COUNT(DISTINCT o.order_id), 2) AS avg_order_value, ROUND(COUNT(DISTINCT o.order_id) / COUNT(DISTINCT u.id), 2) AS orders_per_customer FROM `bigquery-public-data.thelook_ecommerce.users` u LEFT JOIN `bigquery-public-data.thelook_ecommerce.orders` o ON o.user_id = u.id AND o.status NOT IN ('Cancelled', 'Returned') LEFT JOIN `bigquery-public-data.thelook_ecommerce.order_items` oi ON oi.order_id = o.order_id WHERE u.state IN ('X', 'Y') GROUP BY u.state",
+    "report": "To explain an underspending gap between two states, decompose revenue per customer into orders per customer (engagement) times average order value (basket size) — the fix differs completely depending on which one drives the gap. Then break the lagging state down by product category and traffic source in a follow-up query: acquisition mix often explains regional gaps (paid-search-heavy states typically show lower repeat rates than organic/email states). Always report customer counts: a 'gap' between a 50-customer state and a 5,000-customer state is noise, not signal."
+  },
+  {
+    "id": "product-performance",
+    "question": "Which product categories perform best by revenue and margin?",
+    "sql": "SELECT p.category, COUNT(oi.id) AS items_sold, ROUND(SUM(oi.sale_price), 2) AS revenue, ROUND(SUM(oi.sale_price - p.cost), 2) AS gross_margin, ROUND(SAFE_DIVIDE(SUM(oi.sale_price - p.cost), SUM(oi.sale_price)) * 100, 1) AS margin_pct FROM `bigquery-public-data.thelook_ecommerce.order_items` oi JOIN `bigquery-public-data.thelook_ecommerce.products` p ON p.id = oi.product_id JOIN `bigquery-public-data.thelook_ecommerce.orders` o ON o.order_id = oi.order_id WHERE o.status NOT IN ('Cancelled', 'Returned') GROUP BY p.category ORDER BY revenue DESC LIMIT 15",
+    "report": "Category performance must always pair revenue with gross margin (sale price minus product cost): the biggest category by revenue is frequently not the biggest profit contributor. Call out any category whose margin percentage is well below the portfolio average — high-revenue low-margin categories are where pricing reviews pay off. Item counts give the volume context."
+  },
+  {
+    "id": "returns-rate",
+    "question": "Which product categories have the highest return rates?",
+    "sql": "SELECT p.category, COUNT(oi.id) AS items_sold, COUNTIF(oi.status = 'Returned') AS items_returned, ROUND(SAFE_DIVIDE(COUNTIF(oi.status = 'Returned'), COUNT(oi.id)) * 100, 1) AS return_rate_pct FROM `bigquery-public-data.thelook_ecommerce.order_items` oi JOIN `bigquery-public-data.thelook_ecommerce.products` p ON p.id = oi.product_id GROUP BY p.category HAVING items_sold >= 100 ORDER BY return_rate_pct DESC LIMIT 15",
+    "report": "Return rates are computed at the item level (order_items.status), not the order level, since mixed orders can be partially returned. A minimum-volume filter (HAVING items_sold >= 100) keeps low-volume categories from dominating the ranking with noisy rates. Returns eat margin twice — lost revenue plus handling — so pair this with the margin view when recommending action."
+  },
+  {
+    "id": "traffic-source-value",
+    "question": "Which acquisition channels bring the most valuable customers?",
+    "sql": "SELECT u.traffic_source, COUNT(DISTINCT u.id) AS customers, ROUND(SUM(oi.sale_price), 2) AS revenue, ROUND(SAFE_DIVIDE(SUM(oi.sale_price), COUNT(DISTINCT u.id)), 2) AS revenue_per_customer FROM `bigquery-public-data.thelook_ecommerce.users` u LEFT JOIN `bigquery-public-data.thelook_ecommerce.orders` o ON o.user_id = u.id AND o.status NOT IN ('Cancelled', 'Returned') LEFT JOIN `bigquery-public-data.thelook_ecommerce.order_items` oi ON oi.order_id = o.order_id GROUP BY u.traffic_source ORDER BY revenue_per_customer DESC",
+    "report": "Channel value is judged on revenue per acquired customer, not raw revenue — a big channel can be a mediocre one. Use LEFT JOIN from users so never-purchased signups still count in the denominator; dropping them silently inflates every channel's performance. This view has no acquisition cost data, so it speaks to value, not ROI — say so explicitly rather than implying profitability."
+  },
+  {
+    "id": "database-structure",
+    "question": "What data do we have available? What tables and fields can I ask about?",
+    "sql": "SELECT 'orders' AS table_name, 'one row per customer order: status, timestamps (created/shipped/delivered/returned), item count' AS contents UNION ALL SELECT 'order_items', 'one row per item in an order: sale_price, status, links to product and order' UNION ALL SELECT 'products', 'catalog: category, brand, department, retail_price, cost' UNION ALL SELECT 'users', 'customer demographics: age, gender, location (state/country), traffic_source, signup date'",
+    "report": "We analyze four tables: orders, order_items, products, and users. Typical joins: orders to order_items on order_id, order_items to products on product_id, orders to users on user_id. Revenue lives in order_items.sale_price; margin needs products.cost. Customer contact details exist in the source system but are out of bounds for analysis and reporting — customers are referred to by numeric id only."
+  }
+]

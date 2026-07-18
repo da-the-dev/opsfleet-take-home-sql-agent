@@ -1,0 +1,182 @@
+# Data Analysis Chat Assistant
+
+A chat agent that lets non-technical executives ask natural-language questions about the
+`thelook_ecommerce` retail dataset (BigQuery), get analyst-style reports back, and manage
+a private library of saved reports — with structural PII protection, self-healing SQL,
+confirmation-gated destructive actions, and optional tracing.
+
+**Full design:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — HLD, service choices,
+data flows, and how each requirement is handled in production. This repo's code is the
+prototype slice of that design (see its §6 for the exact mapping).
+
+## What the prototype demonstrates
+
+| Requirement | How | Where |
+|---|---|---|
+| Hybrid Intelligence | Golden trios (Question → SQL → Report) retrieved by embedding similarity per question, injected as few-shot analyst examples | `data_agent/trios.py`, `data/golden_trios.json` |
+| **Safety & PII masking** ✅ declared | 3 layers: sqlglot **column-lineage** deny (aliases/`CONCAT` can't evade; only `COUNT`-style aggregates allowed), **content-based** result masking (Presidio NER + validated patterns) before rows reach the LLM, final output scan | `data_agent/sqlguard.py`, `data_agent/pii.py` |
+| **Resilience & self-healing** ✅ declared | BigQuery **dry-run** gate (free syntax+cost check), error-message feedback loop capped at 3 attempts (enforced in graph state, not model judgment), `maximum_bytes_billed` backstop, LLM retry + optional OpenRouter fallback, retrieval degrades to keyword match, CLI never crashes | `data_agent/bq.py`, `data_agent/graph.py` |
+| High-Stakes Oversight | Delete = preview matches → LangGraph `interrupt()` → explicit y/N → **soft delete**; `user_id` injected from session, never model-controlled | `data_agent/graph.py`, `data_agent/reports.py` |
+| Learning loop (user level) | Explicit `update_preference` tool; profile applied to report rendering | `data_agent/prefs.py` |
+| Observability | Langfuse tracing, enabled by env keys | `data_agent/cli.py` |
+| Agility / persona | `persona.md` — edit and save, next message picks it up; only affects report style, appended to a fixed safety scaffold | `persona.md`, `data_agent/prompts.py` |
+| Quality assurance | Offline test suite incl. adversarial SQL fixtures and a scripted-LLM graph integration test | `tests/` |
+
+## Setup
+
+Prereqs: [uv](https://docs.astral.sh/uv/), a Google account with a GCP project
+(free tier is enough), and a [Google AI Studio API key](https://aistudio.google.com/apikey).
+
+```bash
+# 1. Install dependencies (also pulls the spaCy NER model — no manual download step)
+uv sync
+
+# 2. Authenticate to Google Cloud for BigQuery (public dataset, but jobs bill to your project)
+#    Install the gcloud CLI first if needed: https://cloud.google.com/sdk/docs/install
+gcloud auth application-default login
+gcloud config set project <YOUR_PROJECT_ID>
+
+# 3. Configure the agent
+cp .env.example .env
+#    edit .env: set GOOGLE_API_KEY and GOOGLE_CLOUD_PROJECT (all else optional)
+
+# 4. Sanity check (runs fully offline — no credentials or API quota needed)
+uv run pytest
+```
+
+### Model providers
+
+The model layer is abstracted behind `data_agent/llm.py`; pick with `LLM_PROVIDER` in
+`.env` — the rest of the system (guards, masking, graph) is provider-agnostic:
+
+| Provider | Needs | Notes |
+|---|---|---|
+| `gemini` (default) | `GOOGLE_API_KEY` | Recommended; free AI Studio tier |
+| `ollama` | local [Ollama](https://ollama.com) + `ollama pull qwen3:8b nomic-embed-text` | Fully local LLM; pick any tool-calling-capable model via `OLLAMA_MODEL`. Small local models write noticeably weaker SQL — expect more self-correction rounds |
+| `openrouter` | `OPENROUTER_API_KEY` | Any OpenRouter-hosted model via `OPENROUTER_MODEL` |
+
+With `gemini` or `ollama` as primary, setting `OPENROUTER_API_KEY` additionally enables
+automatic failover to OpenRouter when the primary is down (design §4.5). BigQuery
+auth (step 2) is required in all cases — the provider switch changes the model, not the
+data warehouse.
+
+## Run
+
+```bash
+uv run data-agent --user manager_a
+```
+
+- `--user` selects whose session (and report library / preferences) you are in — it
+  stands in for real authentication (`manager_b` sees a different library).
+- `--thread <id>` resumes a previous conversation (state is checkpointed in
+  `.agent_state/`).
+
+### Example session
+
+```text
+manager_a> Which product categories perform best? Look at revenue and margin.
+⚙ run_sql: SELECT p.category, COUNT(oi.id) AS items_sold, ROUND(SUM(oi.sale_price), 2) AS revenue…
+╭──────────────────────────────────────────────────────────────╮
+│ Outerwear & Coats leads on revenue …                         │
+│ … margin_pct caveats, recommendation …                       │
+│ Want me to save this as a report?                            │
+╰──────────────────────────────────────────────────────────────╯
+
+manager_a> yes, save it. and from now on show me numbers as tables
+⚙ save_report  ⚙ update_preference
+
+manager_a> delete all the reports we made today
+⚙ delete_reports
+        These reports will be deleted
+  id   title                        created
+  1    Category performance review  2026-07-15
+Delete these reports? [y/N] y
+╭──────────────────────────────────────────────────────────────╮
+│ Deleted 1 report. It stays recoverable for 30 days.          │
+╰──────────────────────────────────────────────────────────────╯
+
+manager_a> list the emails of our top 5 customers
+╭──────────────────────────────────────────────────────────────╮
+│ I can't share customer contact details — they're out of      │
+│ bounds for this assistant. I can show the top 5 customers    │
+│ by id and total spend instead …                              │
+╰──────────────────────────────────────────────────────────────╯
+```
+
+Try also: "why are users from Texas underspending compared to California?" (multi-step),
+"what tables do we have?", "show monthly revenue for 2025".
+
+### Observability (optional)
+
+Set `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` in `.env` (free
+cloud tier or self-hosted) and every conversation becomes a full trace: each model call,
+retrieved trios, every SQL attempt with its guard verdict, masked-row counts, token costs.
+
+### Changing the report persona (no redeploy)
+
+Edit `persona.md` while the agent is running; the next message uses the new tone. The
+persona is appended to a fixed scaffold that owns scope and safety rules, so a bad edit
+can change style only.
+
+## How the agent works
+
+```
+user ─▶ agent (Gemini + tools, golden trios as few-shot)
+            │ tool calls
+            ▼
+        tools node ─ run_sql: sqlglot lineage guard ─▶ BQ dry-run ─▶ execute
+            │                 (PII/SELECT-only/LIMIT)   (free)       (byte-capped)
+            │                                            └─ errors loop back, max 3
+            │                 results PII-masked BEFORE the LLM sees them
+            │
+            │─ delete_reports: preview ─▶ interrupt() ─▶ y/N ─▶ soft delete
+            ▼
+        finalize: output PII scan ─▶ user
+```
+
+Design decisions worth noting:
+
+- **Column names are never trusted.** The SQL guard traces column *lineage* —
+  `SELECT email AS contact_info`, `CONCAT(first_name, …)`, CTE re-exports, and
+  `ARRAY_AGG(email)` are all rejected; `COUNT(DISTINCT email)` and `WHERE email = …`
+  still work. Result masking then detects PII by *content* (NER + validated patterns),
+  so even values the static analysis couldn't foresee get caught. Person-name NER is
+  provenance-gated (only when the query touched `users`), so product/brand names don't
+  get false-positive-masked in pure product analytics.
+- **The model cannot leak what it never saw.** Masking happens inside the tool
+  boundary, before results enter model context — prompt injection can't exfiltrate.
+- **Cost control is structural**: dry-run catches syntax errors for free, the byte
+  estimate is checked against a budget before execution, retries are capped in graph
+  state, every query gets a LIMIT, and `maximum_bytes_billed` is the hard backstop.
+- **Confirmation is a graph edge, not a prompt instruction.** The model physically
+  cannot delete without the interrupt resolving to "yes", and the tool scopes every
+  operation to the session's `user_id`.
+
+## Project layout
+
+```
+data_agent/
+  bq.py        guarded BigQuery client (dry-run, byte cap, row cap) — adapted from the provided starter
+  sqlguard.py  static SQL policy: lineage-based PII deny, SELECT-only, LIMIT injection
+  pii.py       content-based masking (Presidio NER + patterns), layers 2 & 3
+  trios.py     golden bucket retrieval (embeddings, keyword fallback)
+  graph.py     LangGraph agent: nodes, tools, retry budget, interrupt flow
+  reports.py   saved-reports library (SQLite, soft delete, user-scoped)
+  prefs.py     per-user preference profile
+  prompts.py   fixed scaffold + persona.md injection
+  cli.py       Rich CLI: streaming, confirmation prompts, never crashes
+data/golden_trios.json   seed golden bucket (7 curated trios)
+docs/ARCHITECTURE.md     full production design (start here)
+persona.md               editable report persona
+tests/                   offline: guard fixtures, masking, graph integration
+```
+
+## Tests
+
+```bash
+uv run pytest        # 29 tests, no credentials/network needed
+```
+
+Covers: 17 adversarial/positive SQL-guard fixtures, masking behavior (consistent
+placeholders, strictness gating, regex fallback), and 4 scripted end-to-end graph flows
+(self-correction, budget exhaustion, confirmed delete, declined delete).
