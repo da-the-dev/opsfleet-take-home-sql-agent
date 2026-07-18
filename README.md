@@ -63,6 +63,11 @@ usable, retrieval degrades to keyword matching instead of failing. BigQuery auth
 (step 2) is required in all cases — the provider switch changes the model, not the
 data warehouse.
 
+A full transcript of the verification run lives in
+[docs/E2E_RESULTS.md](docs/E2E_RESULTS.md); a repeated-question consistency study
+(methodology stability, defects found and fixed) in
+[docs/CONSISTENCY_PROBE.md](docs/CONSISTENCY_PROBE.md).
+
 ## Run
 
 ```bash

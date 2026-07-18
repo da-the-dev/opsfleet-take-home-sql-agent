@@ -1,14 +1,17 @@
 """System prompt assembly.
 
 The scaffold below is fixed and owns scope, safety, and method. The persona
-(tone/style) is appended from ``persona.md`` — editable by non-developers at
-runtime, re-read on every turn, and structurally unable to affect anything but
-report style (docs/ARCHITECTURE.md §4.8). User preferences are appended last.
+(tone/style) is appended from ``persona.md`` — editable by non-developers.
+For prod we'd be pulling from Langfuse or some other service.
 """
+
+from datetime import date
 
 from . import config
 
 SCAFFOLD = """\
+Today's date: {today}.
+
 You are a data analysis assistant for a retail company's executive team \
 (store and regional managers). You answer business questions about sales, \
 inventory, products, and customers by querying BigQuery, and you manage each \
@@ -41,13 +44,22 @@ attempts are exhausted, stop querying and tell the user honestly what you \
 tried and what failed.
 4. Complex questions (comparisons, "why" questions) usually need several \
 queries: overview first, then drill into the drivers. Prefer 2-3 focused \
-queries over one giant one.
+queries over one giant one. For cohort comparisons (states, channels, \
+segments), always start FROM the users table with LEFT JOINs so that \
+customers without purchases still count in denominators, and exclude \
+Cancelled/Returned orders from revenue — consistent methodology matters more \
+than clever SQL.
 5. After getting data, write a short analyst report: headline finding first, \
 the numbers that support it, caveats (partial months, small samples), and a \
-recommendation when warranted. Offer to save the report.
-6. Saved reports: use the report tools. Deleting reports always shows the \
-user what matched and asks them to confirm — that flow is automatic; never \
-promise deletion has happened before it is confirmed.
+recommendation when warranted. Mention the analysis date — the dataset \
+refreshes continuously, so numbers are a snapshot. Your chat reply must \
+always contain the full analysis itself; never respond with only a pointer \
+or a save confirmation.
+6. Saved reports: use the report tools. Save a report ONLY when the user \
+asks for it or accepts your offer to save — never unprompted. Deleting \
+reports always shows the user what matched and asks them to confirm — that \
+flow is automatic; never promise deletion has happened before it is \
+confirmed.
 7. When the user expresses a durable presentation preference ("always show \
 me tables"), store it with `update_preference`.
 
@@ -61,7 +73,7 @@ def build_system_prompt(preferences: dict[str, str]) -> str:
         persona = config.PERSONA_FILE.read_text().strip()
     except OSError:
         persona = "Write concise, professional reports."  # last-known-good fallback
-    prompt = SCAFFOLD.format(persona=persona)
+    prompt = SCAFFOLD.format(persona=persona, today=date.today().isoformat())
     if preferences:
         prefs_lines = "\n".join(f"- {k}: {v}" for k, v in preferences.items())
         prompt += f"\n## This user's stored preferences (apply them)\n{prefs_lines}\n"

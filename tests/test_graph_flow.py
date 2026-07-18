@@ -135,6 +135,25 @@ def test_delete_requires_confirmation(tmp_path, monkeypatch):
     assert "Deleted 2" in tool_messages[-1].content
 
 
+def test_blank_reply_retried_once(tmp_path, monkeypatch):
+    script = [
+        AIMessage(content=""),  # transient blank reply
+        AIMessage(content="Recovered: here is the analysis."),
+    ]
+    agent = make_agent(tmp_path, script, monkeypatch)
+    result = agent.graph.invoke({"messages": [("user", "monthly revenue?")]}, run_config())
+    assert result["messages"][-1].content == "Recovered: here is the analysis."
+
+
+def test_blank_reply_never_reaches_user(tmp_path, monkeypatch):
+    script = [AIMessage(content="") for _ in range(3)]  # blank through both nudged retries
+    agent = make_agent(tmp_path, script, monkeypatch)
+    result = agent.graph.invoke({"messages": [("user", "monthly revenue?")]}, run_config())
+    final = result["messages"][-1].content
+    assert final.strip()  # something is always shown
+    assert "glitch" in final
+
+
 def test_delete_declined(tmp_path, monkeypatch):
     script = [
         tool_call("delete_reports", {"mentioning": "Q2"}),

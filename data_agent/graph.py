@@ -49,6 +49,18 @@ class AgentState(MessagesState):
     sql_failures: int
     pii_strict: bool
     trio_context: str
+    empty_retries: int
+
+
+def _is_blank(message) -> bool:
+    """True for an assistant reply with no tool calls and no usable text
+    (a known transient LLM failure mode — must never reach the user as-is)."""
+    if getattr(message, "tool_calls", None):
+        return False
+    content = message.content
+    if isinstance(content, list):
+        content = "".join(p if isinstance(p, str) else p.get("text", "") for p in content)
+    return not str(content).strip()
 
 
 # --- Tool schemas (bodies never run; execution is dispatched in the tool node) ---
@@ -132,18 +144,36 @@ class Agent:
         updates: dict[str, Any] = {}
         last = state["messages"][-1]
         if isinstance(last, HumanMessage):
-            # New user turn: reset the retry budget and refresh retrieval.
+            # New user turn: reset the retry budgets and refresh retrieval.
             updates["sql_failures"] = 0
             updates["pii_strict"] = False
+            updates["empty_retries"] = 0
             trios = self.bucket.retrieve(str(last.content))
             updates["trio_context"] = format_trios(trios)
+        elif isinstance(last, AIMessage) and _is_blank(last):
+            # Re-entered after a blank reply (see route()): count the retry.
+            logger.warning("Blank assistant reply; retrying generation")
+            updates["empty_retries"] = state.get("empty_retries", 0) + 1
 
         user_id = config["configurable"]["user_id"]
         system = prompts.build_system_prompt(self.prefs.get(user_id))
         trio_context = updates.get("trio_context", state.get("trio_context", ""))
         if trio_context:
             system += "\n" + trio_context
-        response = self.llm.invoke([SystemMessage(system), *state["messages"]])
+        # Blank assistant replies stay in state but never go back to the model.
+        history = [
+            m for m in state["messages"] if not (isinstance(m, AIMessage) and _is_blank(m))
+        ]
+        if "empty_retries" in updates and updates["empty_retries"] > 0:
+            # Nudge changes the input: an identical retry at low temperature
+            # tends to reproduce the identical blank.
+            history.append(
+                HumanMessage(
+                    "(system: your previous reply arrived empty. Write out the full "
+                    "answer to my question now, based on the data you already have.)"
+                )
+            )
+        response = self.llm.invoke([SystemMessage(system), *history])
         updates["messages"] = [response]
         return updates
 
@@ -177,6 +207,20 @@ class Agent:
 
     def _finalize_node(self, state: AgentState) -> dict:
         last = state["messages"][-1]
+        if isinstance(last, AIMessage) and _is_blank(last):
+            # Retry budget exhausted and still blank: never show the user nothing.
+            return {
+                "messages": [
+                    AIMessage(
+                        content=(
+                            "I hit a glitch composing the answer just now. The data "
+                            "work succeeded, so please ask again — it should come "
+                            "through on the next attempt."
+                        ),
+                        id=last.id,
+                    )
+                ]
+            }
         if not isinstance(last, AIMessage) or not isinstance(last.content, str):
             return {}
         # Pattern-only (emails/phones): layer 2 guarantees the model never saw a
@@ -290,14 +334,20 @@ class Agent:
     def _build_graph(self, checkpointer):
         def route(state: AgentState) -> str:
             last = state["messages"][-1]
-            return "tools" if getattr(last, "tool_calls", None) else "finalize"
+            if getattr(last, "tool_calls", None):
+                return "tools"
+            if _is_blank(last) and state.get("empty_retries", 0) < 2:
+                return "agent"  # transient blank reply: up to two nudged retries
+            return "finalize"
 
         builder = StateGraph(AgentState)
         builder.add_node("agent", self._agent_node)
         builder.add_node("tools", self._tools_node)
         builder.add_node("finalize", self._finalize_node)
         builder.add_edge(START, "agent")
-        builder.add_conditional_edges("agent", route, {"tools": "tools", "finalize": "finalize"})
+        builder.add_conditional_edges(
+            "agent", route, {"tools": "tools", "finalize": "finalize", "agent": "agent"}
+        )
         builder.add_edge("tools", "agent")
         builder.add_edge("finalize", END)
         return builder.compile(checkpointer=checkpointer)
