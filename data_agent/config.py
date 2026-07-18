@@ -33,6 +33,12 @@ OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
 # fallback whenever the key is set (design doc §4.5); empty = disabled.
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-flash")
+OPENROUTER_EMBEDDING_MODEL = os.getenv(
+    "OPENROUTER_EMBEDDING_MODEL", "openai/text-embedding-3-small"
+)
+# Embeddings for golden-trio retrieval: auto (follow LLM_PROVIDER) | gemini |
+# ollama | openrouter | none (forces keyword-fallback retrieval).
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "auto").lower()
 
 # --- Safety / cost budgets (design doc §4.5) ----------------------------------
 MAX_BYTES_BILLED = int(os.getenv("MAX_BYTES_BILLED", str(2 * 1024**3)))  # 2 GiB

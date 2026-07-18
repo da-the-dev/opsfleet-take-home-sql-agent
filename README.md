@@ -56,8 +56,11 @@ The model layer is abstracted behind `data_agent/llm.py`; pick with `LLM_PROVIDE
 | `openrouter` | `OPENROUTER_API_KEY` | Any OpenRouter-hosted model via `OPENROUTER_MODEL` |
 
 With `gemini` or `ollama` as primary, setting `OPENROUTER_API_KEY` additionally enables
-automatic failover to OpenRouter when the primary is down (design §4.5). BigQuery
-auth (step 2) is required in all cases — the provider switch changes the model, not the
+automatic failover to OpenRouter when the primary is down (design §4.5). Golden-trio
+embeddings follow the same provider by default (`EMBEDDING_PROVIDER=auto`) and can be
+mixed — e.g. OpenRouter chat + local Ollama embeddings; if no embedding provider is
+usable, retrieval degrades to keyword matching instead of failing. BigQuery auth
+(step 2) is required in all cases — the provider switch changes the model, not the
 data warehouse.
 
 ## Run

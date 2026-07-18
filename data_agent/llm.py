@@ -78,12 +78,16 @@ def build_chat_model(tools: Sequence) -> Runnable:
 
 
 def build_embeddings() -> Optional[Embeddings]:
-    """Embeddings for golden-trio retrieval, matched to the provider.
+    """Embeddings for golden-trio retrieval.
 
-    Returns None when the provider has no usable embeddings (retrieval then
-    falls back to keyword matching — degrade, don't die).
+    ``EMBEDDING_PROVIDER=auto`` follows ``LLM_PROVIDER``; set it explicitly to
+    mix (e.g. OpenRouter chat + local Ollama embeddings). Returns None when no
+    provider is usable — retrieval then falls back to keyword matching
+    (degrade, don't die).
     """
-    provider = cfg.LLM_PROVIDER
+    provider = cfg.EMBEDDING_PROVIDER
+    if provider == "auto":
+        provider = cfg.LLM_PROVIDER
     try:
         if provider == "ollama":
             from langchain_ollama import OllamaEmbeddings
@@ -91,11 +95,22 @@ def build_embeddings() -> Optional[Embeddings]:
             return OllamaEmbeddings(
                 model=cfg.OLLAMA_EMBEDDING_MODEL, base_url=cfg.OLLAMA_BASE_URL
             )
-        # OpenRouter exposes no embeddings API; use Gemini's when a key exists.
-        if cfg.GOOGLE_API_KEY:
+        if provider == "openrouter" and cfg.OPENROUTER_API_KEY:
+            from langchain_openai import OpenAIEmbeddings
+            from pydantic import SecretStr
+
+            return OpenAIEmbeddings(
+                model=cfg.OPENROUTER_EMBEDDING_MODEL,
+                api_key=SecretStr(cfg.OPENROUTER_API_KEY),
+                base_url="https://openrouter.ai/api/v1",
+                # Send raw strings: OpenRouter rejects tiktoken token arrays.
+                check_embedding_ctx_length=False,
+            )
+        if provider == "gemini" and cfg.GOOGLE_API_KEY:
             from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
             return GoogleGenerativeAIEmbeddings(model=cfg.EMBEDDING_MODEL)
+        logger.info("No embedding provider for %r; keyword retrieval fallback", provider)
     except Exception:  # noqa: BLE001
         logger.exception("Embedding provider failed to initialize")
     return None
