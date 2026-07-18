@@ -126,7 +126,10 @@ A worked example: *"Why are users from state X underspending vs state Y?"*
 
 1. **Ingress.** CLI sends the message with a session token. FastAPI resolves `user_id`,
    loads the LangGraph checkpoint (conversation state) and the user's preference profile
-   from Postgres. A Langfuse trace opens.
+   from Postgres. A Langfuse trace opens. (Deterministic client-side commands —
+   `/help`, `/reports`, `/resume` — short-circuit before this point: they read the same
+   report/checkpoint stores directly, never spending a model call on lookups the UI can
+   answer itself.)
 2. **Scope guard.** A cheap classification step checks the message is an analysis
    question or a report-library operation. Anything else — casual chat is redirected,
    attempts to extract PII, dump tables, or override instructions are refused. The guard

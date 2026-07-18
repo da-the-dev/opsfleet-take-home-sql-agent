@@ -5,6 +5,12 @@ markdown, and hosts the human-in-the-loop confirmation for destructive report
 operations (the LangGraph interrupt surfaces here as a y/N prompt). The UI
 never crashes on agent errors — failures render as messages and the loop
 continues (design §4.5).
+
+Slash commands (/help, /reports, /resume, …) are handled locally in this
+layer and never reach the model: they read the same report library and
+checkpoint store the agent uses, so they are instant, free, and deterministic.
+Plain-language equivalents ("show my saved reports") still work via the
+agent's tools.
 """
 
 import argparse
@@ -13,8 +19,9 @@ import os
 import sqlite3
 import sys
 import uuid
+from dataclasses import dataclass, field
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 from rich.console import Console
@@ -25,8 +32,121 @@ from rich.table import Table
 from . import config as cfg
 from . import pii
 from .graph import Agent
+from .reports import ReportLibrary
 
 logger = logging.getLogger(__name__)
+
+
+HELP = """\
+**What I can do**
+- Answer business questions over the company dataset (orders, products, \
+customers) — trends, comparisons, "why" questions.
+- Save analyses as reports and manage your private report library \
+(deletions always ask for confirmation first).
+- Remember presentation preferences ("always show me tables").
+
+**Slash commands** *(handled locally — instant, never sent to the model)*
+
+| command | what it does |
+|---|---|
+| `/help` | this message |
+| `/reports` | list your saved reports |
+| `/report <id>` | show a saved report |
+| `/threads` | list your past conversations |
+| `/resume <id>` | switch to a past conversation (full context restored) |
+| `/new` | start a fresh conversation |
+| `exit` | quit (also Ctrl-D) |
+
+Plain language works for all of this too — "show my saved reports" or \
+"delete the Texas report" go through the agent. The commands are just the \
+fast path.\
+"""
+
+
+@dataclass
+class Session:
+    """Mutable per-session state the slash commands read and update."""
+
+    console: Console
+    library: ReportLibrary
+    checkpoint_conn: sqlite3.Connection
+    user: str
+    thread: str
+    callbacks: list = field(default_factory=list)
+
+    @property
+    def run_config(self) -> dict:
+        return {
+            "configurable": {"thread_id": f"{self.user}:{self.thread}", "user_id": self.user},
+            "callbacks": self.callbacks,
+            "recursion_limit": 50,
+        }
+
+    def known_threads(self) -> list[str]:
+        """Past conversation ids for this user, from the checkpoint store."""
+        try:
+            rows = self.checkpoint_conn.execute(
+                "SELECT DISTINCT thread_id FROM checkpoints WHERE thread_id LIKE ?",
+                (f"{self.user}:%",),
+            ).fetchall()
+        except sqlite3.OperationalError:  # fresh DB, no checkpoints table yet
+            return []
+        return sorted(r[0].split(":", 1)[1] for r in rows)
+
+
+def handle_command(session: Session, line: str) -> bool:
+    """Dispatch a local slash command. Returns False if `line` is not one."""
+    if not line.startswith("/"):
+        return False
+    console = session.console
+    cmd, _, arg = line[1:].partition(" ")
+    cmd, arg = cmd.lower(), arg.strip()
+
+    if cmd == "help":
+        console.print(Panel(Markdown(HELP), title="Help", border_style="cyan"))
+    elif cmd == "reports":
+        reports = session.library.list_reports(session.user)
+        if not reports:
+            console.print("[dim]No saved reports yet — ask me to save an analysis.[/]")
+        else:
+            table = Table(title=f"Saved reports · {session.user}")
+            table.add_column("id", justify="right")
+            table.add_column("title")
+            table.add_column("created")
+            for r in reports:
+                table.add_row(str(r.id), r.title, r.created_at[:16])
+            table.caption = "Show one with /report <id>"
+            console.print(table)
+    elif cmd == "report":
+        if not arg.isdigit():
+            console.print("[dim]Usage: /report <id> — see ids with /reports[/]")
+        elif report := session.library.get(session.user, int(arg)):
+            console.print(Panel(Markdown(report.body), title=report.title, border_style="green"))
+        else:
+            console.print(f"[dim]No report with id {arg} — see /reports[/]")
+    elif cmd == "threads":
+        threads = session.known_threads()
+        if not threads:
+            console.print("[dim]No past conversations yet.[/]")
+        else:
+            for t in threads:
+                marker = " [cyan](current)[/]" if t == session.thread else ""
+                console.print(f"  {t}{marker}")
+            console.print("[dim]Switch with /resume <id>[/]")
+    elif cmd == "resume":
+        if not arg:
+            console.print("[dim]Usage: /resume <id> — see ids with /threads[/]")
+        else:
+            fresh = arg not in session.known_threads()
+            session.thread = arg
+            note = " (new thread — no history yet)" if fresh else " — context restored"
+            console.print(f"[cyan]Now on thread [bold]{arg}[/]{note}[/]")
+    elif cmd == "new":
+        session.thread = uuid.uuid4().hex[:8]
+        console.print(f"[cyan]Started fresh thread [bold]{session.thread}[/][/]")
+    else:
+        console.print(f"[dim]Unknown command /{cmd} — try /help[/]")
+    return True
 
 
 def _langfuse_callbacks() -> list:
@@ -56,7 +176,7 @@ def _confirm_deletion(console: Console, payload: dict) -> str:
 
 def _turn(agent: Agent, console: Console, run_config: dict, user_input) -> None:
     """One user turn: stream the graph, surface interrupts, print the answer."""
-    payload = {"messages": [HumanMessage(user_input)]}
+    payload: Command | dict[str, list[BaseMessage]]= {"messages": [HumanMessage(user_input)]}
     while True:  # loops only when an interrupt needs resuming
         final: AIMessage | None = None
         interrupted = None
@@ -91,6 +211,9 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    # Presidio warns about every non-English recognizer it skips — noise that
+    # would bury the welcome screen.
+    logging.getLogger("presidio-analyzer").setLevel(logging.ERROR)
     console = Console()
 
     try:
@@ -101,23 +224,30 @@ def main() -> None:
         console.print(f"[red]{e}[/]")
         sys.exit(1)
 
-    thread = args.thread or uuid.uuid4().hex[:8]
-    run_config = {
-        "configurable": {"thread_id": f"{args.user}:{thread}", "user_id": args.user},
-        "callbacks": _langfuse_callbacks(),
-        "recursion_limit": 50,
-    }
-
     with console.status("[dim]starting up (BigQuery, NER, embeddings)…[/]", spinner="dots"):
-        checkpointer = SqliteSaver(sqlite3.connect(cfg.CHECKPOINT_DB, check_same_thread=False))
-        agent = Agent(checkpointer)
+        checkpoint_conn = sqlite3.connect(cfg.CHECKPOINT_DB, check_same_thread=False)
+        agent = Agent(SqliteSaver(checkpoint_conn))
         pii.warm_up()
+
+    session = Session(
+        console=console,
+        library=agent.library,
+        checkpoint_conn=checkpoint_conn,
+        user=args.user,
+        thread=args.thread or uuid.uuid4().hex[:8],
+        callbacks=_langfuse_callbacks(),
+    )
 
     console.print(
         Panel(
-            f"Signed in as [bold]{args.user}[/] · thread [bold]{thread}[/]\n"
-            "Ask about sales, products, customers — or manage your saved reports.\n"
-            "[dim]Ctrl-D or 'exit' to quit.[/]",
+            f"Signed in as [bold]{args.user}[/] · thread [bold]{session.thread}[/]\n\n"
+            "I answer business questions about sales, products, and customers,\n"
+            "and keep your private library of saved reports. Try:\n"
+            '  [italic]"How did revenue trend over the last 6 months?"[/]\n'
+            '  [italic]"Compare Texas and California customers — why the gap?"[/]\n'
+            '  [italic]"Save that as a report"  ·  "Show my saved reports"[/]\n\n'
+            "[dim]/help · /reports · /report <id> · /threads · /resume <id> · /new"
+            " · 'exit' or Ctrl-D to quit[/]",
             title="Data Analysis Assistant",
             border_style="cyan",
         )
@@ -135,7 +265,9 @@ def main() -> None:
             console.print("[dim]bye[/]")
             break
         try:
-            _turn(agent, console, run_config, user_input)
+            if handle_command(session, user_input):
+                continue
+            _turn(agent, console, session.run_config, user_input)
         except Exception as e:  # noqa: BLE001 - the chat surface never crashes
             logger.exception("turn failed")
             console.print(

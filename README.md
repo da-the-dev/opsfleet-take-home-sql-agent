@@ -79,6 +79,27 @@ uv run data-agent --user manager_a
 - `--thread <id>` resumes a previous conversation (state is checkpointed in
   `.agent_state/`).
 
+### Slash commands
+
+The welcome screen lists the essentials; `/help` shows the full set. Commands
+are handled **locally in the CLI** — they read the same report library and
+checkpoint store the agent uses, but never invoke the model, so they are
+instant, free, and always behave the same way:
+
+| command | what it does |
+|---|---|
+| `/help` | capabilities + command reference |
+| `/reports` | list your saved reports |
+| `/report <id>` | show a saved report |
+| `/threads` | list your past conversations |
+| `/resume <id>` | switch to a past conversation (full context restored) |
+| `/new` | start a fresh conversation |
+
+Plain language still works for all of it ("show my saved reports", "delete the
+Texas report") — that path goes through the agent's tools. The commands exist
+because "how do I pull up an old report?" shouldn't require guessing a phrasing
+or spending a model call.
+
 ### Example session (from a real verification run, `google/gemini-3.5-flash`)
 
 ```text
@@ -200,7 +221,7 @@ tests/                   offline: guard fixtures, masking, graph integration
 ## Tests
 
 ```bash
-uv run pytest        # offline suite: 36 tests, no credentials/network needed
+uv run pytest        # offline suite: 43 tests, no credentials/network needed
 uv run pytest evals  # live consistency eval: real BigQuery + LLM (~5 min, cents)
 ```
 
@@ -208,7 +229,8 @@ The offline suite covers: 21 adversarial/positive SQL-guard fixtures (incl. prov
 analysis), masking behavior (consistent placeholders, strictness and provenance gating,
 regex fallback), and 6 scripted end-to-end graph flows (self-correction, budget
 exhaustion, blank-reply recovery, confirmed/declined deletes) driving the real
-LangGraph with a fake LLM and fake BigQuery.
+LangGraph with a fake LLM and fake BigQuery, plus 7 slash-command tests (dispatch,
+per-user isolation of reports and threads, thread switching).
 
 The **live eval** (`evals/test_consistency.py`) re-runs the same analytical question in
 N fresh threads (default 3, `CONSISTENCY_RUNS=5` to widen) and asserts the properties
