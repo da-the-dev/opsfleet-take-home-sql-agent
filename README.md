@@ -38,8 +38,8 @@ The model layer is abstracted behind `data_agent/llm.py`; pick with `LLM_PROVIDE
 | Provider | Needs | Notes |
 |---|---|---|
 | `gemini` (default) | `GOOGLE_API_KEY` | Recommended; free AI Studio tier |
-| `ollama` | local [Ollama](https://ollama.com) + `ollama pull qwen3:8b nomic-embed-text` | Fully local LLM; pick any tool-calling-capable model via `OLLAMA_MODEL`. Small local models write noticeably weaker SQL — expect more self-correction rounds |
 | `openrouter` | `OPENROUTER_API_KEY` | Any OpenRouter-hosted model via `OPENROUTER_MODEL` |
+| `ollama` | local [Ollama](https://ollama.com) + `ollama pull qwen3:8b nomic-embed-text` | Fully local LLM; pick any tool-calling-capable model via `OLLAMA_MODEL`. Small local models write noticeably weaker SQL — expect more self-correction rounds |
 
 With `gemini` or `ollama` as primary, setting `OPENROUTER_API_KEY` additionally enables
 automatic failover to OpenRouter when the primary is down (design §4.5). Golden-trio
