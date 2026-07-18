@@ -109,19 +109,37 @@ class Masker:
             text = text[:start] + self._placeholder(text[start:end], entity) + text[end:]
         return text
 
-    def mask_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [
-            {k: self.mask_text(v) if isinstance(v, str) else v for k, v in row.items()}
-            for row in rows
-        ]
+    def mask_rows(
+        self, rows: list[dict[str, Any]], ner_exempt: frozenset[str] = frozenset()
+    ) -> list[dict[str, Any]]:
+        """Mask string cells; columns in `ner_exempt` get pattern-only detection
+        (emails/phones) — their provenance was proven non-PII by sqlguard, so
+        person-NER (the false-positive-prone detector) is skipped for them."""
+        pattern_only = Masker(include_person=False)
+        pattern_only._placeholders = self._placeholders  # share numbering
+        pattern_only._counters = self._counters
+        out = []
+        for row in rows:
+            masked_row = {}
+            for k, v in row.items():
+                if not isinstance(v, str):
+                    masked_row[k] = v
+                    continue
+                engine = pattern_only if k in ner_exempt else self
+                masked_row[k] = engine.mask_text(v)
+            out.append(masked_row)
+        self.hits += pattern_only.hits
+        return out
 
 
 def mask_result_rows(
-    rows: list[dict[str, Any]], touches_pii_table: bool
+    rows: list[dict[str, Any]],
+    touches_pii_table: bool,
+    ner_exempt: frozenset[str] = frozenset(),
 ) -> tuple[list[dict[str, Any]], int]:
     """Layer 2: mask a result set before it enters LLM context."""
     masker = Masker(include_person=touches_pii_table)
-    masked = masker.mask_rows(rows)
+    masked = masker.mask_rows(rows, ner_exempt=ner_exempt)
     if masker.hits:
         logger.warning("PII mask (layer 2) redacted %d value(s) from query results", masker.hits)
     return masked, masker.hits

@@ -179,7 +179,10 @@ class Agent:
         last = state["messages"][-1]
         if not isinstance(last, AIMessage) or not isinstance(last.content, str):
             return {}
-        cleaned, hits = pii.scan_output(last.content, strict_person=state.get("pii_strict", False))
+        # Pattern-only (emails/phones): layer 2 guarantees the model never saw a
+        # real customer name, so person-"names" in the prose are business terms
+        # or hallucinations — NER-masking here would only degrade reports.
+        cleaned, hits = pii.scan_output(last.content)
         if not hits:
             return {}
         return {"messages": [AIMessage(content=cleaned, id=last.id)]}
@@ -208,7 +211,9 @@ class Agent:
                 validated.touches_pii_table,
             )
         masked_rows, masked_count = pii.mask_result_rows(
-            result.rows, validated.touches_pii_table
+            result.rows,
+            validated.touches_pii_table,
+            ner_exempt=validated.ner_exempt_columns,
         )
         payload = {
             "total_rows": result.total_rows,

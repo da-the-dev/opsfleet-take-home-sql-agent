@@ -88,6 +88,28 @@ def test_non_pii_table_not_strict():
     assert not result.touches_pii_table
 
 
+def test_provenance_proven_columns_are_ner_exempt():
+    result = validate(
+        f"SELECT u.state, COUNT(DISTINCT u.id) AS customers FROM {USERS} u "
+        "GROUP BY u.state LIMIT 10"
+    )
+    assert "state" in result.ner_exempt_columns
+    assert "customers" in result.ner_exempt_columns
+
+
+def test_unqualified_single_table_columns_exempt():
+    result = validate(f"SELECT state, country FROM {USERS} LIMIT 5")
+    assert {"state", "country"} <= set(result.ner_exempt_columns)
+
+
+def test_cte_sourced_columns_not_exempt():
+    result = validate(
+        f"WITH s AS (SELECT state AS region FROM {USERS}) "
+        "SELECT region FROM s LIMIT 5"
+    )
+    assert "region" not in result.ner_exempt_columns
+
+
 # --- Statement policy ------------------------------------------------------------
 
 def test_dml_rejected():

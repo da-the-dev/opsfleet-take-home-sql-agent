@@ -50,6 +50,24 @@ def test_clean_text_untouched():
     assert hits == 0 and cleaned == text
 
 
+def test_ner_exempt_column_keeps_geo_names():
+    rows = [{"state": "São Paulo", "note": "ask Maria Rodriguez"}]
+    masked, _ = pii.mask_result_rows(
+        rows, touches_pii_table=True, ner_exempt=frozenset({"state"})
+    )
+    assert masked[0]["state"] == "São Paulo"  # provenance-proven column: NER skipped
+    if pii._analyzer() is not None:
+        assert "<PERSON_" in masked[0]["note"]  # unproven column: NER stays on
+
+
+def test_ner_exempt_column_still_masks_emails():
+    rows = [{"state": "reach me at x@y.io"}]
+    masked, hits = pii.mask_result_rows(
+        rows, touches_pii_table=True, ner_exempt=frozenset({"state"})
+    )
+    assert "x@y.io" not in masked[0]["state"] and hits == 1
+
+
 def test_regex_fallback_covers_emails(monkeypatch=None):
     spans = pii._detect("write to a.b@c.de now", include_person=False)
     assert any(kind.startswith("EMAIL") for _, _, kind in spans)

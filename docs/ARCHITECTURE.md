@@ -218,7 +218,7 @@ below operates on *column lineage* or on *cell values*, which rename tricks cann
 |---|---|---|
 | 1. Source / static | Production: BigQuery **column-level security (policy tags)** — the agent's service account cannot read tagged columns at all, enforced by the platform, immune to any SQL phrasing. Prototype (public dataset, can't alter): sqlglot **column lineage** analysis — every output column is traced back through aliases, CTEs, subqueries, and expressions to its source columns; if any source is on the PII deny-list, the query is rejected and regenerated. This catches `AS contact_info` and `CONCAT(first_name, …)`, which literal name matching would miss. | (a), most of (b), the aliasing/derivation half of (c) |
 | 2. Tool boundary (the load-bearing layer) | Every result set is inspected and masked **before entering LLM context**, by *content*, not by header: pattern-with-validation detectors for structured PII (email, phone) over all string cells, plus **NER-based person-name detection** — Microsoft **Presidio** (recognizers + spaCy NER) in the prototype, **Cloud DLP infoType detectors** (`PERSON_NAME`, `EMAIL_ADDRESS`, …) in production. Names are the hard case — no regex matches "Maria Rodriguez" — which is exactly why detection must be model/dictionary-based and value-level. | All of (c); makes (b) structurally impossible — the model cannot leak what it never saw |
-| 3. Output | The same content-based scan (Presidio / DLP) on the rendered report before egress. | Residual anything, incl. PII memorized from few-shot examples or hallucinated |
+| 3. Output | Pattern scan (validated email/phone detectors) on the rendered report before egress. Person-NER is deliberately *not* hard-masked here: layer 2 guarantees no real customer name ever entered model context, so name-like strings in the prose are business terms or hallucinations — masking them would only degrade reports (NER hits are logged as an observability signal instead). | Residual structured PII from any path, incl. few-shot examples |
 
 Plus the **scope guard** (§3 step 2): the agent only answers analysis questions; requests
 to enumerate or export customer contact data are refused before any SQL is written.
@@ -226,10 +226,15 @@ Aggregations remain fully functional — `COUNT(DISTINCT u.email)` never returns
 itself, and lineage analysis distinguishes aggregation-only usage from projection.
 
 Layer 2 has an inherent precision trade-off — NER on short cell values will
-occasionally false-positive (a product line named "Jordan") — which is acceptable
-here: a masked token in an aggregate analysis costs little, a leak costs a lot. The
-mask emits typed placeholders (`<PERSON_1>`, `<EMAIL_1>`), consistent within a result
-set, so the model can still reason about distinct entities without seeing them.
+false-positive on name-like business data ("Jordan" the product line, "São Paulo" the
+state). We keep that surface small with **provenance gating**: layer 1's lineage
+analysis already proves, per output column, which physical columns it derives from.
+Columns proven to derive only from non-PII sources (geo fields, categories, brands —
+data the owner ruled fine) skip person-NER; columns whose provenance can't be resolved
+(opaque expressions, CTE re-exports) keep it. Email/phone pattern detection stays on
+everywhere — its validated patterns don't false-positive. Residual masks emit typed
+placeholders (`<PERSON_1>`, `<EMAIL_1>`), consistent within a result set, so the model
+can still reason about distinct entities without seeing them.
 
 ### 4.3 High-Stakes Oversight (Destructive Ops)
 

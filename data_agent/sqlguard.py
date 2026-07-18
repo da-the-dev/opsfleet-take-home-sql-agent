@@ -46,6 +46,11 @@ class GuardViolation(Exception):
 class ValidatedQuery:
     sql: str  # possibly rewritten (LIMIT injected)
     touches_pii_table: bool  # drives strictness of result masking (layer 2)
+    # Output columns whose provenance is fully resolved to non-PII physical
+    # columns; person-NER masking is skipped for these (values proven to come
+    # from data the owner ruled non-PII, e.g. users.state). Columns with
+    # unresolvable provenance stay NER-checked.
+    ner_exempt_columns: frozenset[str] = frozenset()
 
 
 def _is_position_safe(column: exp.Column) -> bool:
@@ -82,6 +87,36 @@ def _column_is_pii(column: exp.Column, scope) -> bool:
         return False
     # Unqualified: unique to `users` in this dataset — treat as PII.
     return True
+
+
+def _provenance_safe_outputs(tree: exp.Expression, root_scope) -> frozenset[str]:
+    """Output columns of the root SELECT whose every column reference resolves
+    to a physical table (all deny-listed sources were already rejected, so a
+    fully-resolved column is by construction non-PII). Subqueries, CTE-sourced
+    columns, and UNIONs are left unproven — person-NER stays on for those."""
+    if not isinstance(tree, exp.Select):
+        return frozenset()
+    sources = list(root_scope.sources.values())
+    sole_table = len(sources) == 1 and isinstance(sources[0], exp.Table)
+    safe: set[str] = set()
+    for projection in tree.selects:
+        name = projection.alias_or_name
+        if not name:
+            continue
+        if projection.find(exp.Subquery, exp.Select):
+            continue
+        proven = True
+        for column in projection.find_all(exp.Column):
+            if column.table:
+                if not isinstance(root_scope.sources.get(column.table), exp.Table):
+                    proven = False
+                    break
+            elif not sole_table:  # unqualified over joins/CTEs: can't prove
+                proven = False
+                break
+        if proven:
+            safe.add(name)
+    return frozenset(safe)
 
 
 def validate(sql: str) -> ValidatedQuery:
@@ -133,7 +168,13 @@ def validate(sql: str) -> ValidatedQuery:
                     "use the numeric `id`/`user_id` instead."
                 )
 
+    ner_exempt = _provenance_safe_outputs(tree, root_scope)
+
     if isinstance(tree, exp.Select) and tree.args.get("limit") is None:
         tree = tree.limit(config.DEFAULT_ROW_LIMIT)
 
-    return ValidatedQuery(sql=tree.sql(dialect="bigquery"), touches_pii_table=touches_pii_table)
+    return ValidatedQuery(
+        sql=tree.sql(dialect="bigquery"),
+        touches_pii_table=touches_pii_table,
+        ner_exempt_columns=ner_exempt,
+    )
