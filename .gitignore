@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Live-eval transcripts
+evals/output/
+.agent_state/*
+
+# macOS
+.DS_Store

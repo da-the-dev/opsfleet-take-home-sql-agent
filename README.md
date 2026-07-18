@@ -200,10 +200,19 @@ tests/                   offline: guard fixtures, masking, graph integration
 ## Tests
 
 ```bash
-uv run pytest        # 34 tests, no credentials/network needed
+uv run pytest        # offline suite: 36 tests, no credentials/network needed
+uv run pytest evals  # live consistency eval: real BigQuery + LLM (~5 min, cents)
 ```
 
-Covers: 21 adversarial/positive SQL-guard fixtures (incl. provenance analysis), masking
-behavior (consistent placeholders, strictness and provenance gating, regex fallback),
-and 4 scripted end-to-end graph flows (self-correction, budget exhaustion, confirmed
-delete, declined delete) driving the real LangGraph with a fake LLM and fake BigQuery.
+The offline suite covers: 21 adversarial/positive SQL-guard fixtures (incl. provenance
+analysis), masking behavior (consistent placeholders, strictness and provenance gating,
+regex fallback), and 6 scripted end-to-end graph flows (self-correction, budget
+exhaustion, blank-reply recovery, confirmed/declined deletes) driving the real
+LangGraph with a fake LLM and fake BigQuery.
+
+The **live eval** (`evals/test_consistency.py`) re-runs the same analytical question in
+N fresh threads (default 3, `CONSISTENCY_RUNS=5` to widen) and asserts the properties
+established in [docs/CONSISTENCY_PROBE.md](docs/CONSISTENCY_PROBE.md): methodology
+pinning (LEFT JOIN + status filter survive in every run), cross-run numeric and verdict
+agreement, date-stamped non-blank answers, and no unprompted report saves. Transcripts
+land in `evals/output/`.

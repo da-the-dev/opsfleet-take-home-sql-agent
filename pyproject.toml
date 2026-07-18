@@ -29,6 +29,12 @@ data-agent = "data_agent.cli:main"
 [dependency-groups]
 dev = ["pytest>=9.1.1"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]  # offline suite only; run live evals explicitly: pytest evals
+markers = [
+    "live: hits real BigQuery and LLM providers (costs money); run via `uv run pytest evals`",
+]
+
 [build-system]
 requires = ["uv_build>=0.11,<0.13"]
 build-backend = "uv_build"
