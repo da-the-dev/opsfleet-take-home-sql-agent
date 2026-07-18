@@ -57,6 +57,11 @@ flowchart LR
         GRAPH <--> GUARD
     end
 
+    subgraph Obs["Observability & Control"]
+        LF["Langfuse<br/>traces, evals, prompt mgmt<br/>(persona lives here)"]
+        PROM["Prometheus + Grafana<br/>service metrics · alerting"]
+    end
+
     subgraph DataPlane["Data Plane"]
         BQ[("BigQuery<br/>thelook_ecommerce<br/>read-only SA + policy tags")]
         PG[("Cloud SQL Postgres<br/>+ pgvector<br/>reports · checkpoints ·<br/>user prefs · trio index")]
@@ -75,19 +80,13 @@ flowchart LR
         OR["OpenRouter<br/>fallback provider"]
     end
 
-    subgraph Obs["Observability & Control"]
-        LF["Langfuse<br/>traces · evals · prompt mgmt<br/>(persona lives here)"]
-        PROM["Prometheus + Grafana<br/>service metrics · alerting"]
-    end
-
     CLI <--> API
     GRAPH --> BQ
     GRAPH <--> PG
     GRAPH --> GEMINI
     GRAPH -. "on failure" .-> OR
-    GRAPH -->|traces, feedback| LF
+    GRAPH <-->|traces & feedback / persona prompt| LF
     GRAPH -->|candidate trios| CURATE
-    LF -->|persona prompt at runtime| GRAPH
     API --> PROM
 ```
 
