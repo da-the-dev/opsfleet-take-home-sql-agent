@@ -6,21 +6,7 @@ a private library of saved reports — with structural PII protection, self-heal
 confirmation-gated destructive actions, and optional tracing.
 
 **Full design:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — HLD, service choices,
-data flows, and how each requirement is handled in production. This repo's code is the
-prototype slice of that design (see its §6 for the exact mapping).
-
-## What the prototype demonstrates
-
-| Requirement | How | Where |
-|---|---|---|
-| Hybrid Intelligence | Golden trios (Question → SQL → Report) retrieved by embedding similarity per question, injected as few-shot analyst examples | `data_agent/trios.py`, `data/golden_trios.json` |
-| **Safety & PII masking** ✅ declared | 3 layers: sqlglot **column-lineage** deny (aliases/`CONCAT` can't evade; only `COUNT`-style aggregates allowed), **content-based** result masking (Presidio NER + validated patterns) before rows reach the LLM, final output scan | `data_agent/sqlguard.py`, `data_agent/pii.py` |
-| **Resilience & self-healing** ✅ declared | BigQuery **dry-run** gate (free syntax+cost check), error-message feedback loop capped at 3 attempts (enforced in graph state, not model judgment), `maximum_bytes_billed` backstop, LLM retry + optional OpenRouter fallback, retrieval degrades to keyword match, CLI never crashes | `data_agent/bq.py`, `data_agent/graph.py` |
-| High-Stakes Oversight | Delete = preview matches → LangGraph `interrupt()` → explicit y/N → **soft delete**; `user_id` injected from session, never model-controlled | `data_agent/graph.py`, `data_agent/reports.py` |
-| Learning loop (user level) | Explicit `update_preference` tool; profile applied to report rendering | `data_agent/prefs.py` |
-| Observability | Langfuse tracing, enabled by env keys | `data_agent/cli.py` |
-| Agility / persona | `persona.md` — edit and save, next message picks it up; only affects report style, appended to a fixed safety scaffold | `persona.md`, `data_agent/prompts.py` |
-| Quality assurance | Offline test suite incl. adversarial SQL fixtures and a scripted-LLM graph integration test | `tests/` |
+data flows, and how each requirement is handled in production and in this prototype.
 
 ## Setup
 
@@ -62,11 +48,6 @@ mixed — e.g. OpenRouter chat + local Ollama embeddings; if no embedding provid
 usable, retrieval degrades to keyword matching instead of failing. BigQuery auth
 (step 2) is required in all cases — the provider switch changes the model, not the
 data warehouse.
-
-A full transcript of the verification run lives in
-[docs/E2E_RESULTS.md](docs/E2E_RESULTS.md); a repeated-question consistency study
-(methodology stability, defects found and fixed) in
-[docs/CONSISTENCY_PROBE.md](docs/CONSISTENCY_PROBE.md).
 
 ## Run
 
@@ -165,6 +146,12 @@ Edit `persona.md` while the agent is running; the next message uses the new tone
 persona is appended to a fixed scaffold that owns scope and safety rules, so a bad edit
 can change style only.
 
+## Requirements coverage
+
+Every requirement from the brief — how it's handled in production and how this prototype
+implements it today — is mapped one by one in
+[docs/ARCHITECTURE.md, §6](docs/ARCHITECTURE.md#6-detailed-design-by-requirement).
+
 ## How the agent works
 
 ```
@@ -238,3 +225,6 @@ established in [docs/CONSISTENCY_PROBE.md](docs/CONSISTENCY_PROBE.md): methodolo
 pinning (LEFT JOIN + status filter survive in every run), cross-run numeric and verdict
 agreement, date-stamped non-blank answers, and no unprompted report saves. Transcripts
 land in `evals/output/`.
+
+A full transcript of the verification run lives in
+[docs/E2E_RESULTS.md](docs/E2E_RESULTS.md).
